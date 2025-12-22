@@ -46,6 +46,27 @@ pub struct Snapaste {
 impl Snapaste {
     pub fn new(clipboard_receiver: Receiver<ClipboardEvent>, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
+        
+        // 启动后台定时器任务，定期轮询粘贴板事件
+        // 确保即使窗口没有焦点也能更新数据
+        cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            let this = this.clone();
+            async move {
+                loop {
+                    // 每 500ms 轮询一次
+                    cx.background_executor().timer(Duration::from_millis(500)).await;
+                    let result = this.update(&mut cx, |this, cx| {
+                        this.poll_clipboard_events(cx);
+                    });
+                    // 如果更新失败（例如视图已销毁），退出循环
+                    if result.is_err() {
+                        break;
+                    }
+                }
+            }
+        }).detach();
+        
         Self {
             theme: Theme::dark(),
             search_box: SearchBox::new(),
