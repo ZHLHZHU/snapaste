@@ -20,6 +20,17 @@ actions!(
         ClearSearch,
         DeleteItem,
         Backspace,
+        Select1,
+        Select2,
+        Select3,
+        Select4,
+        Select5,
+        Select6,
+        Select7,
+        Select8,
+        Select9,
+        ClearHistory,
+        QuitApp,
     ]
 );
 
@@ -190,6 +201,30 @@ impl Snapaste {
         self.update_list_items();
         cx.notify();
     }
+    
+    /// 选择指定索引的项并复制
+    fn select_item(&mut self, index: usize, cx: &mut Context<Self>) {
+        let filtered = self.history.search(&self.search_query);
+        if let Some(item) = filtered.get(index) {
+            match Clipboard::new() {
+                Ok(mut clipboard) => {
+                    if clipboard.set_text(&item.content).is_ok() {
+                        self.status_message = Some(format!("✓ 已复制: {}", Self::truncate(&item.content, 30)).into());
+                    }
+                }
+                Err(_) => {}
+            }
+            cx.notify();
+        }
+    }
+    
+    /// 清空历史记录
+    fn clear_history(&mut self, cx: &mut Context<Self>) {
+        self.history.clear();
+        self.update_list_items();
+        self.status_message = Some("✓ 历史记录已清空".into());
+        cx.notify();
+    }
 
     /// 截断字符串
     fn truncate(s: &str, max_len: usize) -> String {
@@ -247,58 +282,43 @@ impl Snapaste {
             )
     }
 
-    /// 渲染列表项
-    fn render_list_item(&self, item: &ListItemProps) -> Div {
+    /// 渲染列表项（紧凑单行样式）
+    fn render_list_item(&self, item: &ListItemProps, index: usize) -> Div {
         let theme = &self.theme;
         let bg_color = if item.selected { theme.selected } else { theme.surface };
-        let selected = item.selected;
         
-        let mut base = div()
+        // 快捷键提示 (⌘1 - ⌘9)
+        let shortcut: SharedString = if index < 9 {
+            format!("⌘{}", index + 1).into()
+        } else {
+            "".into()
+        };
+        
+        div()
             .w_full()
             .h(px(Sizes::LIST_ITEM_HEIGHT))
             .px(px(Sizes::PADDING))
-            .py(px(Sizes::PADDING_SM))
             .bg(bg_color)
-            .border_b_1()
-            .border_color(theme.border)
             .cursor_pointer()
             .flex()
-            .flex_col()
-            .justify_center()
+            .items_center()
+            .justify_between()
             .child(
                 div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(Sizes::FONT_SIZE))
-                            .text_color(theme.text_primary)
-                            .overflow_hidden()
-                            .child(item.content.clone())
-                    )
-                    .child(
-                        div()
-                            .ml(px(12.0))
-                            .text_size(px(Sizes::FONT_SIZE_SM))
-                            .text_color(theme.text_secondary)
-                            .child(item.timestamp.clone())
-                    )
-            );
-        
-        if selected {
-            base = base.child(
+                    .flex_1()
+                    .text_size(px(Sizes::FONT_SIZE))
+                    .text_color(theme.text_primary)
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(item.content.clone())
+            )
+            .child(
                 div()
-                    .mt(px(4.0))
+                    .ml(px(8.0))
                     .text_size(px(Sizes::FONT_SIZE_SM))
                     .text_color(theme.text_secondary)
-                    .child("按 Enter 复制")
-            );
-        }
-        
-        base
+                    .child(shortcut)
+            )
     }
 
     /// 渲染历史列表
@@ -326,7 +346,7 @@ impl Snapaste {
             div()
                 .flex_1()
                 .overflow_hidden()
-                .children(items.iter().map(|item| self.render_list_item(item)))
+                .children(items.iter().enumerate().map(|(idx, item)| self.render_list_item(item, idx)))
         }
     }
 
@@ -360,6 +380,63 @@ impl Snapaste {
                     )
             )
     }
+    
+    /// 渲染底部菜单
+    fn render_bottom_menu(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = &self.theme;
+        
+        div()
+            .w_full()
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(theme.surface)
+            .child(
+                div()
+                    .w_full()
+                    .h(px(Sizes::MENU_ITEM_HEIGHT))
+                    .px(px(Sizes::PADDING))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.hover))
+                    .child(
+                        div()
+                            .text_size(px(Sizes::FONT_SIZE))
+                            .text_color(theme.text_primary)
+                            .child("清除")
+                    )
+                    .child(
+                        div()
+                            .text_size(px(Sizes::FONT_SIZE_SM))
+                            .text_color(theme.text_secondary)
+                            .child("⌥⌘⌫")
+                    )
+            )
+            .child(
+                div()
+                    .w_full()
+                    .h(px(Sizes::MENU_ITEM_HEIGHT))
+                    .px(px(Sizes::PADDING))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.hover))
+                    .child(
+                        div()
+                            .text_size(px(Sizes::FONT_SIZE))
+                            .text_color(theme.text_primary)
+                            .child("退出")
+                    )
+                    .child(
+                        div()
+                            .text_size(px(Sizes::FONT_SIZE_SM))
+                            .text_color(theme.text_secondary)
+                            .child("⌘Q")
+                    )
+            )
+    }
 }
 
 impl Render for Snapaste {
@@ -372,12 +449,13 @@ impl Render for Snapaste {
         div()
             .size_full()
             .bg(theme.background)
+            .rounded(px(Sizes::RADIUS))
             .flex()
             .flex_col()
             .track_focus(&self.focus_handle)
             .child(self.render_search_box(cx))
             .child(self.render_history_list(cx))
-            .child(self.render_status_bar(cx))
+            .child(self.render_bottom_menu(cx))
             .on_action(cx.listener(|this, _: &MoveUp, _window, cx| {
                 this.move_up(cx);
             }))
@@ -393,9 +471,18 @@ impl Render for Snapaste {
             .on_action(cx.listener(|this, _: &Backspace, _window, cx| {
                 this.backspace(cx);
             }))
+            .on_action(cx.listener(|this, _: &Select1, _window, cx| { this.select_item(0, cx); }))
+            .on_action(cx.listener(|this, _: &Select2, _window, cx| { this.select_item(1, cx); }))
+            .on_action(cx.listener(|this, _: &Select3, _window, cx| { this.select_item(2, cx); }))
+            .on_action(cx.listener(|this, _: &Select4, _window, cx| { this.select_item(3, cx); }))
+            .on_action(cx.listener(|this, _: &Select5, _window, cx| { this.select_item(4, cx); }))
+            .on_action(cx.listener(|this, _: &Select6, _window, cx| { this.select_item(5, cx); }))
+            .on_action(cx.listener(|this, _: &Select7, _window, cx| { this.select_item(6, cx); }))
+            .on_action(cx.listener(|this, _: &Select8, _window, cx| { this.select_item(7, cx); }))
+            .on_action(cx.listener(|this, _: &Select9, _window, cx| { this.select_item(8, cx); }))
+            .on_action(cx.listener(|this, _: &ClearHistory, _window, cx| { this.clear_history(cx); }))
+            .on_action(cx.listener(|_, _: &QuitApp, _window, cx| { cx.quit(); }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                // 处理字符输入
-                // 暂时忽略非字符键和组合键（除了 Shift）
                 let modifiers = event.keystroke.modifiers;
                 let is_plain = !modifiers.control && !modifiers.alt && !modifiers.platform && !modifiers.function;
                 
@@ -403,13 +490,6 @@ impl Render for Snapaste {
                     if let Some(char_str) = &event.keystroke.key_char {
                         this.handle_key_input(char_str, cx);
                     }
-                } else if modifiers.platform && event.keystroke.key == "w" {
-                    // Cmd+W 关闭窗口（但不退出应用，除非是最后一个窗口且策略如此）
-                } else if modifiers.platform && event.keystroke.key == "w" {
-                    // Cmd+W 关闭窗口
-                    // cx.window().close(); 
-                } else if modifiers.platform && event.keystroke.key == "q" {
-                    cx.quit();
                 }
             }))
     }
@@ -457,17 +537,15 @@ impl AppController {
             return;
         };
 
-        // 重新实现 open_window 逻辑
+        // 弹出菜单样式的窗口选项
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
                 size(px(Sizes::WINDOW_WIDTH), px(Sizes::WINDOW_HEIGHT)),
                 cx,
             ))),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Snapaste - 粘贴板历史".into()),
-                ..Default::default()
-            }),
+            titlebar: None, // 无标题栏
+            window_background: WindowBackgroundAppearance::Blurred,
             ..Default::default()
         };
         
@@ -511,6 +589,19 @@ pub fn run_gui() -> anyhow::Result<()> {
             KeyBinding::new("enter", Confirm, None),
             KeyBinding::new("escape", Escape, None),
             KeyBinding::new("backspace", Backspace, None),
+            // ⌘1-⌘9 快捷键
+            KeyBinding::new("cmd-1", Select1, None),
+            KeyBinding::new("cmd-2", Select2, None),
+            KeyBinding::new("cmd-3", Select3, None),
+            KeyBinding::new("cmd-4", Select4, None),
+            KeyBinding::new("cmd-5", Select5, None),
+            KeyBinding::new("cmd-6", Select6, None),
+            KeyBinding::new("cmd-7", Select7, None),
+            KeyBinding::new("cmd-8", Select8, None),
+            KeyBinding::new("cmd-9", Select9, None),
+            // 其他快捷键
+            KeyBinding::new("alt-cmd-backspace", ClearHistory, None),
+            KeyBinding::new("cmd-q", QuitApp, None),
         ]);
         
         // 设置 Dock 菜单

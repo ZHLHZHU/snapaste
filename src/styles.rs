@@ -53,23 +53,25 @@ pub struct Sizes;
 
 impl Sizes {
     /// 窗口宽度
-    pub const WINDOW_WIDTH: f32 = 600.0;
+    pub const WINDOW_WIDTH: f32 = 420.0;
     /// 窗口高度
-    pub const WINDOW_HEIGHT: f32 = 500.0;
+    pub const WINDOW_HEIGHT: f32 = 480.0;
     /// 内边距
-    pub const PADDING: f32 = 12.0;
+    pub const PADDING: f32 = 8.0;
     /// 小内边距
-    pub const PADDING_SM: f32 = 8.0;
+    pub const PADDING_SM: f32 = 4.0;
     /// 圆角
-    pub const RADIUS: f32 = 8.0;
+    pub const RADIUS: f32 = 10.0;
     /// 小圆角
     pub const RADIUS_SM: f32 = 4.0;
-    /// 列表项高度
-    pub const LIST_ITEM_HEIGHT: f32 = 60.0;
+    /// 列表项高度（紧凑单行）
+    pub const LIST_ITEM_HEIGHT: f32 = 28.0;
     /// 搜索框高度
-    pub const SEARCH_HEIGHT: f32 = 44.0;
+    pub const SEARCH_HEIGHT: f32 = 36.0;
     /// 字体大小
-    pub const FONT_SIZE: f32 = 14.0;
+    pub const FONT_SIZE: f32 = 13.0;
     /// 小字体
-    pub const FONT_SIZE_SM: f32 = 12.0;
+    pub const FONT_SIZE_SM: f32 = 11.0;
+    /// 菜单项高度
+    pub const MENU_ITEM_HEIGHT: f32 = 24.0;
 }
