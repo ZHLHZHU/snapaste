@@ -43,17 +43,17 @@ fn main() {
 
 /// 检查是否只有一个实例在运行
 fn one_instance_check() -> Option<std::fs::File> {
+    use directories::ProjectDirs;
     use fs2::FileExt;
     use std::fs::File;
-    use directories::ProjectDirs;
 
     let proj_dirs = ProjectDirs::from("com", "snapaste", "snapaste")?;
     let data_dir = proj_dirs.data_local_dir();
     std::fs::create_dir_all(data_dir).ok()?;
-    
+
     let lock_file_path = data_dir.join("snapaste.lock");
     let file = File::create(lock_file_path).ok()?;
-    
+
     match file.try_lock_exclusive() {
         Ok(_) => Some(file),
         Err(_) => None,
@@ -64,6 +64,14 @@ fn one_instance_check() -> Option<std::fs::File> {
 fn run_gui() {
     println!("=== Snapaste - 粘贴板历史管理工具 ===");
     println!("正在启动 GUI 模式...\n");
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(e) = gtk::init() {
+            eprintln!("无法初始化 GTK: {}", e);
+            return;
+        }
+    }
 
     if let Err(e) = ui::run_gui() {
         eprintln!("GUI 启动失败: {}", e);
