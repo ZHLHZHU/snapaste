@@ -1,5 +1,5 @@
 use crate::components::list_item::ListItemProps;
-use gpui::*;
+// use gpui::*; // Removed unused import
 
 /// 历史列表组件
 pub struct HistoryList {

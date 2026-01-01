@@ -1,4 +1,4 @@
-use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use muda::{Menu, MenuItem, PredefinedMenuItem};
 use tray_icon::{
     TrayIcon, TrayIconBuilder,
     menu::MenuEvent,

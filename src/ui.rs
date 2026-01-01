@@ -1,15 +1,17 @@
 use crate::clipboard_monitor::{ClipboardEvent, ClipboardMonitor};
 use crate::components::history_list::HistoryList;
 use crate::components::list_item::ListItemProps;
+
 use crate::components::search_box::SearchBox;
-use crate::history::{ClipboardHistory, ClipboardItem};
+use crate::history::ClipboardHistory;
 use crate::styles::{Sizes, Theme};
 use arboard::Clipboard;
 use gpui::*;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
+use global_hotkey::{GlobalHotKeyManager, GlobalHotKeyEvent, hotkey::{HotKey, Modifiers, Code}};
 
-/// 应用程序动作
+// 应用程序动作
 actions!(
     snapaste,
     [
@@ -31,6 +33,9 @@ actions!(
         Select9,
         ClearHistory,
         QuitApp,
+        CloseWindow,
+        ConfirmClear,
+        CancelClear,
     ]
 );
 
@@ -52,6 +57,10 @@ pub struct Snapaste {
     search_query: String,
     /// 焦点句柄
     focus_handle: FocusHandle,
+    /// 光标可见状态（用于闪烁动画）
+    cursor_visible: bool,
+    /// 是否显示清除确认对话框
+    show_clear_confirm: bool,
 }
 
 impl Snapaste {
@@ -69,8 +78,29 @@ impl Snapaste {
                     cx.background_executor().timer(Duration::from_millis(500)).await;
                     let result = this.update(&mut cx, |this, cx| {
                         this.poll_clipboard_events(cx);
+                        
+                        // TODO: 实现窗口失焦自动隐藏
+                        // 目前 cx.is_window_focused() 不存在
                     });
                     // 如果更新失败（例如视图已销毁），退出循环
+                    if result.is_err() {
+                        break;
+                    }
+                }
+            }
+        }).detach();
+        
+        // 启动光标闪烁定时器
+        cx.spawn(|this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let mut cx = cx.clone();
+            let this = this.clone();
+            async move {
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(530)).await;
+                    let result = this.update(&mut cx, |this, cx| {
+                        this.cursor_visible = !this.cursor_visible;
+                        cx.notify();
+                    });
                     if result.is_err() {
                         break;
                     }
@@ -87,6 +117,8 @@ impl Snapaste {
             status_message: None,
             search_query: String::new(),
             focus_handle,
+            cursor_visible: true,
+            show_clear_confirm: false,
         }
     }
 
@@ -171,7 +203,7 @@ impl Snapaste {
         cx.notify();
     }
 
-    /// 确认选择（复制到粘贴板）
+    /// 确认选择（复制到粘贴板并自动粘贴）
     fn confirm_selection(&mut self, cx: &mut Context<Self>) {
         let query = self.search_box.query.to_string();
         let filtered = self.history.search(&query);
@@ -180,6 +212,28 @@ impl Snapaste {
             match Clipboard::new() {
                 Ok(mut clipboard) => {
                     if clipboard.set_text(&item.content).is_ok() {
+                        // 隐藏窗口
+                        cx.hide();
+                        
+                        // 模拟 Cmd+V 粘贴
+                        // 需要在后台线程执行，避免阻塞 UI，同时给予窗口隐藏的时间
+                        cx.spawn(|_, cx: &mut AsyncApp| {
+                            let cx = cx.clone();
+                            async move {
+                                 // 等待窗口隐藏和焦点切换 - 增加到 300ms 以确保稳定性
+                                 cx.background_executor().timer(Duration::from_millis(300)).await;
+                                 
+                                 #[cfg(target_os = "macos")]
+                                 {
+                                     use std::process::Command;
+                                     let _ = Command::new("osascript")
+                                         .arg("-e")
+                                         .arg("tell application \"System Events\" to keystroke \"v\" using command down")
+                                         .output();
+                                 }
+                            }
+                        }).detach();
+                        
                         self.status_message = Some(format!("✓ 已复制: {}", Self::truncate(&item.content, 30)).into());
                     } else {
                         self.status_message = Some("✗ 复制失败".into());
@@ -202,13 +256,32 @@ impl Snapaste {
         cx.notify();
     }
     
-    /// 选择指定索引的项并复制
+    /// 选择指定索引的项并复制（自动粘贴）
     fn select_item(&mut self, index: usize, cx: &mut Context<Self>) {
         let filtered = self.history.search(&self.search_query);
         if let Some(item) = filtered.get(index) {
             match Clipboard::new() {
                 Ok(mut clipboard) => {
                     if clipboard.set_text(&item.content).is_ok() {
+                        // 隐藏窗口
+                        cx.hide();
+                        
+                        // 模拟 Cmd+V 粘贴
+                        cx.spawn(|_, cx: &mut AsyncApp| {
+                            let cx = cx.clone();
+                            async move {
+                                 cx.background_executor().timer(Duration::from_millis(300)).await;
+                                 #[cfg(target_os = "macos")]
+                                 {
+                                     use std::process::Command;
+                                     let _ = Command::new("osascript")
+                                         .arg("-e")
+                                         .arg("tell application \"System Events\" to keystroke \"v\" using command down")
+                                         .output();
+                                 }
+                            }
+                        }).detach();
+                        
                         self.status_message = Some(format!("✓ 已复制: {}", Self::truncate(&item.content, 30)).into());
                     }
                 }
@@ -223,6 +296,19 @@ impl Snapaste {
         self.history.clear();
         self.update_list_items();
         self.status_message = Some("✓ 历史记录已清空".into());
+        self.show_clear_confirm = false;
+        cx.notify();
+    }
+    
+    /// 显示清除确认对话框
+    fn show_clear_confirm(&mut self, cx: &mut Context<Self>) {
+        self.show_clear_confirm = true;
+        cx.notify();
+    }
+    
+    /// 取消清除
+    fn cancel_clear(&mut self, cx: &mut Context<Self>) {
+        self.show_clear_confirm = false;
         cx.notify();
     }
 
@@ -240,11 +326,8 @@ impl Snapaste {
     fn render_search_box(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
         let query = &self.search_query;
-        let display_text: SharedString = if query.is_empty() {
-            "输入搜索...".into()
-        } else {
-            format!("{}▏", query).into()
-        };
+        // 移除不用的 display_text 变量，逻辑已移至 relative div 内部
+        // let display_text: SharedString = ...
         
         div()
             .w_full()
@@ -272,12 +355,22 @@ impl Snapaste {
                             .mr(px(8.0))
                             .child("🔍")
                     )
+                    .cursor_text() // 鼠标放上去显示文本编辑指针
                     .child(
                         div()
                             .flex_1()
                             .text_size(px(Sizes::FONT_SIZE))
                             .text_color(if query.is_empty() { theme.text_secondary } else { theme.text_primary })
-                            .child(display_text)
+                            .relative()
+                            .child(if query.is_empty() { SharedString::from("输入搜索...") } else { SharedString::from(query.clone()) })
+                            // 闪烁光标独立渲染，避免移位
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top(px(0.0))
+                                    .left(if query.is_empty() { px(0.0) } else { px(query.chars().count() as f32 * 9.0) }) // 估算偏移
+                                    .child(if self.cursor_visible { "▏" } else { "" })
+                            )
                     )
             )
     }
@@ -382,7 +475,7 @@ impl Snapaste {
     }
     
     /// 渲染底部菜单
-    fn render_bottom_menu(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_bottom_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
         
         div()
@@ -392,6 +485,7 @@ impl Snapaste {
             .bg(theme.surface)
             .child(
                 div()
+                    .id("clear-button")
                     .w_full()
                     .h(px(Sizes::MENU_ITEM_HEIGHT))
                     .px(px(Sizes::PADDING))
@@ -400,6 +494,9 @@ impl Snapaste {
                     .justify_between()
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.hover))
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        this.show_clear_confirm(cx);
+                    }))
                     .child(
                         div()
                             .text_size(px(Sizes::FONT_SIZE))
@@ -415,6 +512,7 @@ impl Snapaste {
             )
             .child(
                 div()
+                    .id("close-button")
                     .w_full()
                     .h(px(Sizes::MENU_ITEM_HEIGHT))
                     .px(px(Sizes::PADDING))
@@ -423,6 +521,9 @@ impl Snapaste {
                     .justify_between()
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.hover))
+                    .on_click(cx.listener(|_this, _event, _window, cx| {
+                        cx.hide();
+                    }))
                     .child(
                         div()
                             .text_size(px(Sizes::FONT_SIZE))
@@ -437,6 +538,89 @@ impl Snapaste {
                     )
             )
     }
+    
+    /// 渲染确认对话框
+    fn render_confirm_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = &self.theme;
+        
+        div()
+            .absolute()
+            .inset_0()
+            .bg(hsla(0.0, 0.0, 0.0, 0.5))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w(px(280.0))
+                    .bg(theme.surface)
+                    .rounded(px(Sizes::RADIUS))
+                    .border_1()
+                    .border_color(theme.border)
+                    .p(px(Sizes::PADDING * 2.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(Sizes::PADDING))
+                    .child(
+                        div()
+                            .text_size(px(Sizes::FONT_SIZE))
+                            .text_color(theme.text_primary)
+                            .child("确定要清空所有历史记录吗？")
+                    )
+                    .child(
+                        div()
+                            .text_size(px(Sizes::FONT_SIZE_SM))
+                            .text_color(theme.text_secondary)
+                            .child("此操作不可撤销")
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(Sizes::PADDING))
+                            .justify_end()
+                            .child(
+                                div()
+                                    .id("cancel-clear")
+                                    .px(px(12.0))
+                                    .py(px(6.0))
+                                    .bg(theme.background)
+                                    .rounded(px(Sizes::RADIUS_SM))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme.hover))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.cancel_clear(cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_size(px(Sizes::FONT_SIZE_SM))
+                                            .text_color(theme.text_primary)
+                                            .child("取消")
+                                    )
+                            )
+                            .child(
+                                div()
+                                    .id("confirm-clear")
+                                    .px(px(12.0))
+                                    .py(px(6.0))
+                                    .bg(theme.error)
+                                    .rounded(px(Sizes::RADIUS_SM))
+                                    .cursor_pointer()
+                                    .hover(|s| s.opacity(0.9))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.clear_history(cx);
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_size(px(Sizes::FONT_SIZE_SM))
+                                            .text_color(theme.text_primary)
+                                            .child("确认清除")
+                                    )
+                            )
+                    )
+            )
+    }
 }
 
 impl Render for Snapaste {
@@ -445,8 +629,9 @@ impl Render for Snapaste {
         self.poll_clipboard_events(cx);
         
         let theme = &self.theme;
+        let show_dialog = self.show_clear_confirm;
         
-        div()
+        let mut main_view = div()
             .size_full()
             .bg(theme.background)
             .rounded(px(Sizes::RADIUS))
@@ -466,7 +651,11 @@ impl Render for Snapaste {
                 this.confirm_selection(cx);
             }))
             .on_action(cx.listener(|this, _: &Escape, _window, cx| {
-                this.clear_search(cx);
+                if this.show_clear_confirm {
+                    this.cancel_clear(cx);
+                } else {
+                    this.clear_search(cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &Backspace, _window, cx| {
                 this.backspace(cx);
@@ -482,6 +671,7 @@ impl Render for Snapaste {
             .on_action(cx.listener(|this, _: &Select9, _window, cx| { this.select_item(8, cx); }))
             .on_action(cx.listener(|this, _: &ClearHistory, _window, cx| { this.clear_history(cx); }))
             .on_action(cx.listener(|_, _: &QuitApp, _window, cx| { cx.quit(); }))
+            .on_action(cx.listener(|_, _: &CloseWindow, _window, cx| { cx.hide(); }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let modifiers = event.keystroke.modifiers;
                 let is_plain = !modifiers.control && !modifiers.alt && !modifiers.platform && !modifiers.function;
@@ -491,18 +681,26 @@ impl Render for Snapaste {
                         this.handle_key_input(char_str, cx);
                     }
                 }
-            }))
+            }));
+        
+        // 如果显示确认对话框，添加遮罩层
+        if show_dialog {
+            main_view = main_view.child(self.render_confirm_dialog(cx));
+        }
+        
+        main_view
     }
 }
 
 /// 全局应用控制器
 struct AppController {
     tray: Option<crate::tray::TrayManager>,
+    hotkey_manager: Option<GlobalHotKeyManager>,
     window_handle: Option<WindowHandle<Snapaste>>,
 }
 
 impl AppController {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(hotkey_manager: Option<GlobalHotKeyManager>, _cx: &mut Context<Self>) -> Self {
         // 创建托盘
         let tray = crate::tray::TrayManager::new().ok();
         if tray.is_some() {
@@ -511,6 +709,7 @@ impl AppController {
         
         Self {
             tray,
+            hotkey_manager,
             window_handle: None,
         }
     }
@@ -579,6 +778,7 @@ impl AppController {
 }
 
 /// 运行 GUI 应用
+/// 运行 GUI 应用
 pub fn run_gui() -> anyhow::Result<()> {
     // 创建 GPUI 应用
     Application::new().run(move |cx: &mut App| {
@@ -608,34 +808,34 @@ pub fn run_gui() -> anyhow::Result<()> {
         cx.set_dock_menu(vec![
             gpui::MenuItem::action("显示 Snapaste", MoveUp),
         ]);
+
+        // 注册全局热键 Ctrl+/
+        let hotkey_manager = GlobalHotKeyManager::new().ok();
+        if let Some(ref manager) = hotkey_manager {
+            let hotkey = HotKey::new(Some(Modifiers::CONTROL), Code::Slash);
+            if let Err(e) = manager.register(hotkey) {
+                eprintln!("无法注册全局热键 Ctrl+/: {:?}", e);
+            } else {
+                println!("✓ 全局热键 Ctrl+/ 已注册");
+            }
+        }
         
-        // 创建全局控制器
-        // 注意：我们需要共享 Clipboard Monitor。
-        // 更好的架构：
-        // AppController 持有 Monitor。
-        // AppController 启动一个后台任务 loop { monitor.recv() => model.update() }
-        // AppController 的 model.update 中，如果 window_handle 存在，则 window.update(snapaste.add(event))。
-        
-        // 为了避免大幅重构 Snapaste，还是用简单的“重建 Monitor”法，或者“全局广播”。
-        // 这里采用：AppController 启动时创建 Monitor，并把 Receiver 包装在 Arc<Mutex<Option<Receiver>>> 中？
-        // 不，Receiver !Sync。
-        
-        // 采用方案：AppController 负责 poll clipboard，然后 push 给 Snapaste。
-        // Snapaste removing `poll_clipboard_events`. 添加 `add_history_item`.
-        let app_controller = cx.new(|cx| AppController::new(cx));
+        // 创建全局控制器，并传入 hotkey_manager 以保持其生命周期
+        let app_controller = cx.new(|cx| AppController::new(hotkey_manager, cx));
         
         // 首次打开窗口
         app_controller.update(cx, |controller, cx| {
              controller.open_window(cx);
         });
         
-        // 启动后台任务监听托盘菜单（轮询）
+        // 启动后台任务监听托盘菜单和全局热键（轮询）
         cx.spawn(|cx: &mut AsyncApp| {
-            let mut cx = cx.clone();
+            let cx = cx.clone();
             async move {
                 let menu_receiver = muda::MenuEvent::receiver();
+                let hotkey_receiver = GlobalHotKeyEvent::receiver();
                 loop {
-                    // 使用 try_recv 避免阻塞
+                    // 使用 try_recv 避免阻塞 - 菜单事件
                     while let Ok(event) = menu_receiver.try_recv() {
                         let _ = cx.update(|cx| {
                             app_controller.update(cx, |controller, cx| {
@@ -643,8 +843,19 @@ pub fn run_gui() -> anyhow::Result<()> {
                             });
                         });
                     }
-                    // 等待 100ms
-                    cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+
+                    // 使用 try_recv 避免阻塞 - 全局热键事件
+                    while let Ok(event) = hotkey_receiver.try_recv() {
+                        println!("⚡ 收到全局热键事件: {:?}", event);
+                        let _ = cx.update(|cx| {
+                            app_controller.update(cx, |controller, cx| {
+                                controller.open_window(cx);
+                            });
+                        });
+                    }
+
+                    // 等待 200ms
+                    cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
                 }
             }
         }).detach();
