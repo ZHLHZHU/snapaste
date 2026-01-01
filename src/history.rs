@@ -1,4 +1,12 @@
 use chrono::{DateTime, Local};
+use crate::config::StorageConfig;
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ContentType {
+    Text,
+    Image,
+    File,
+}
 
 /// 粘贴板历史项
 #[derive(Debug, Clone)]
@@ -6,15 +14,22 @@ pub struct ClipboardItem {
     pub id: usize,
     pub content: String,
     pub timestamp: DateTime<Local>,
+    pub first_copied_at: DateTime<Local>,
+    pub copy_count: usize,
+    pub content_type: ContentType,
 }
 
 impl ClipboardItem {
     /// 创建新的历史项
-    pub fn new(id: usize, content: String) -> Self {
+    pub fn new(id: usize, content: String, content_type: ContentType) -> Self {
+        let now = Local::now();
         Self {
             id,
             content,
-            timestamp: Local::now(),
+            timestamp: now,
+            first_copied_at: now,
+            copy_count: 1,
+            content_type,
         }
     }
 
@@ -51,16 +66,26 @@ impl ClipboardHistory {
     }
 
     /// 添加新项(如果不是重复的)
-    pub fn add(&mut self, content: String) -> bool {
-        // 去重:检查是否与最近一项相同
-        if let Some(last) = self.items.first() {
-            if last.content == content {
-                return false;
-            }
+    /// 添加新项(如果不是重复的)
+    pub fn add(&mut self, content: String, config: &StorageConfig) -> bool {
+        // 检查内容类型是否被允许
+        // 目前暂只处理文本，后续可扩展
+        if !config.store_text {
+            return false;
+        }
+
+        // 检查是否已存在
+        if let Some(idx) = self.items.iter().position(|item| item.content == content) {
+            // 已存在，更新时间戳和复制次数，并移动到开头
+            let mut item = self.items.remove(idx);
+            item.timestamp = Local::now();
+            item.copy_count += 1;
+            self.items.insert(0, item);
+            return true;
         }
 
         // 创建新项
-        let item = ClipboardItem::new(self.next_id, content);
+        let item = ClipboardItem::new(self.next_id, content, ContentType::Text);
         self.next_id += 1;
 
         // 插入到开头
@@ -79,18 +104,32 @@ impl ClipboardHistory {
         &self.items
     }
 
-    /// 根据查询过滤历史项
-    pub fn search(&self, query: &str) -> Vec<ClipboardItem> {
-        if query.is_empty() {
-            return self.items.clone();
+    /// 根据查询过滤并排序历史项
+    pub fn search(&self, query: &str, sort_order: &crate::config::SortOrder) -> Vec<ClipboardItem> {
+        let mut results = if query.is_empty() {
+            self.items.clone()
+        } else {
+            let query_lower = query.to_lowercase();
+            self.items
+                .iter()
+                .filter(|item| item.content.to_lowercase().contains(&query_lower))
+                .cloned()
+                .collect()
+        };
+
+        match sort_order {
+            crate::config::SortOrder::LastCopied => {
+                results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            }
+            crate::config::SortOrder::FirstCopied => {
+                results.sort_by(|a, b| b.first_copied_at.cmp(&a.first_copied_at));
+            }
+            crate::config::SortOrder::CopyCount => {
+                results.sort_by(|a, b| b.copy_count.cmp(&a.copy_count));
+            }
         }
 
-        let query_lower = query.to_lowercase();
-        self.items
-            .iter()
-            .filter(|item| item.content.to_lowercase().contains(&query_lower))
-            .cloned()
-            .collect()
+        results
     }
 
     /// 根据 ID 获取项
@@ -111,5 +150,13 @@ impl ClipboardHistory {
     /// 检查是否为空
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// 设置最大历史项数量并截断
+    pub fn set_max_items(&mut self, max_items: usize) {
+        self.max_items = max_items;
+        if self.items.len() > self.max_items {
+            self.items.truncate(self.max_items);
+        }
     }
 }

@@ -11,11 +11,14 @@ use std::sync::mpsc::{self, Receiver, Sender};
 pub enum TrayEvent {
     /// 显示主窗口
     ShowWindow,
+    /// 显示设置窗口
+    ShowSettings,
     /// 退出应用
     Quit,
 }
 
 pub const SHOW_ID: &str = "show";
+pub const SETTINGS_ID: &str = "settings";
 pub const QUIT_ID: &str = "quit";
 
 /// 托盘管理器
@@ -24,6 +27,7 @@ pub struct TrayManager {
     event_sender: Sender<TrayEvent>,
     event_receiver: Option<Receiver<TrayEvent>>,
     show_item_id: muda::MenuId,
+    settings_item_id: muda::MenuId,
     quit_item_id: muda::MenuId,
 }
 
@@ -43,6 +47,14 @@ impl TrayManager {
         );
         let show_item_id = show_item.id().clone();
         
+        let settings_item = MenuItem::with_id(
+            muda::MenuId::new(SETTINGS_ID),
+            "设置...",
+            true,
+            None
+        );
+        let settings_item_id = settings_item.id().clone();
+        
         let quit_item = MenuItem::with_id(
             muda::MenuId::new(QUIT_ID),
             "退出",
@@ -52,6 +64,7 @@ impl TrayManager {
         let quit_item_id = quit_item.id().clone();
         
         menu.append(&show_item)?;
+        menu.append(&settings_item)?;
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&quit_item)?;
         
@@ -69,6 +82,7 @@ impl TrayManager {
             event_sender,
             event_receiver: Some(event_receiver),
             show_item_id,
+            settings_item_id,
             quit_item_id,
         })
     }
@@ -83,6 +97,8 @@ impl TrayManager {
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == self.show_item_id {
                 let _ = self.event_sender.send(TrayEvent::ShowWindow);
+            } else if event.id == self.settings_item_id {
+                let _ = self.event_sender.send(TrayEvent::ShowSettings);
             } else if event.id == self.quit_item_id {
                 let _ = self.event_sender.send(TrayEvent::Quit);
             }

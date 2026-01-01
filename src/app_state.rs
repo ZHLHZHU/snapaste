@@ -1,4 +1,5 @@
 use crate::history::{ClipboardHistory, ClipboardItem};
+use crate::config::AppConfig;
 
 /// 应用程序状态
 pub struct AppState {
@@ -10,22 +11,26 @@ pub struct AppState {
     pub selected_index: usize,
     /// 过滤后的历史项
     filtered_items: Vec<ClipboardItem>,
+    /// 应用程序配置
+    pub config: AppConfig,
 }
 
 impl AppState {
     /// 创建新的应用状态
     pub fn new() -> Self {
+        let config = AppConfig::load();
         Self {
-            history: ClipboardHistory::new(100),
+            history: ClipboardHistory::new(config.storage.limit),
             search_query: String::new(),
             selected_index: 0,
             filtered_items: Vec::new(),
+            config,
         }
     }
 
     /// 添加新的粘贴板内容
     pub fn add_clipboard_content(&mut self, content: String) {
-        if self.history.add(content) {
+        if self.history.add(content, &self.config.storage) {
             self.update_filtered_items();
         }
     }
@@ -39,7 +44,7 @@ impl AppState {
 
     /// 更新过滤后的项
     fn update_filtered_items(&mut self) {
-        self.filtered_items = self.history.search(&self.search_query);
+        self.filtered_items = self.history.search(&self.search_query, &self.config.storage.sort_order);
     }
 
     /// 获取过滤后的历史项

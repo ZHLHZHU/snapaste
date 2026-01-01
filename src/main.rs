@@ -1,5 +1,6 @@
 mod app_state;
 mod clipboard_monitor;
+mod config;
 mod components;
 mod history;
 mod styles;

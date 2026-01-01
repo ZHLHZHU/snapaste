@@ -3,7 +3,8 @@ use crate::components::history_list::HistoryList;
 use crate::components::list_item::ListItemProps;
 
 use crate::components::search_box::SearchBox;
-use crate::history::ClipboardHistory;
+use crate::history::{ClipboardHistory, ClipboardItem};
+use crate::config::{AppConfig, PasteBehavior, SortOrder};
 use crate::styles::{Sizes, Theme};
 use arboard::Clipboard;
 use gpui::*;
@@ -61,11 +62,14 @@ pub struct Snapaste {
     cursor_visible: bool,
     /// 是否显示清除确认对话框
     show_clear_confirm: bool,
+    /// 应用程序配置
+    config: AppConfig,
 }
 
 impl Snapaste {
     pub fn new(clipboard_receiver: Receiver<ClipboardEvent>, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
+        let config = AppConfig::load();
         
         // 启动后台定时器任务，定期轮询粘贴板事件
         // 确保即使窗口没有焦点也能更新数据
@@ -112,13 +116,14 @@ impl Snapaste {
             theme: Theme::dark(),
             search_box: SearchBox::new(),
             history_list: HistoryList::new(),
-            history: ClipboardHistory::new(100),
+            history: ClipboardHistory::new(config.storage.limit),
             clipboard_receiver,
             status_message: None,
             search_query: String::new(),
             focus_handle,
             cursor_visible: true,
             show_clear_confirm: false,
+            config,
         }
     }
 
@@ -126,7 +131,7 @@ impl Snapaste {
     fn poll_clipboard_events(&mut self, cx: &mut Context<Self>) {
         // 处理粘贴板事件
         while let Ok(event) = self.clipboard_receiver.try_recv() {
-            if self.history.add(event.content.clone()) {
+            if self.history.add(event.content.clone(), &self.config.storage) {
                 self.update_list_items();
                 self.status_message = Some(format!("📋 新增: {}", Self::truncate(&event.content, 30)).into());
                 cx.notify();
@@ -138,7 +143,7 @@ impl Snapaste {
 
     /// 更新列表项
     fn update_list_items(&mut self) {
-        let filtered = self.history.search(&self.search_query);
+        let filtered = self.history.search(&self.search_query, &self.config.storage.sort_order);
         
         let selected_idx = self.history_list.selected_index;
         
@@ -206,33 +211,30 @@ impl Snapaste {
     /// 确认选择（复制到粘贴板并自动粘贴）
     fn confirm_selection(&mut self, cx: &mut Context<Self>) {
         let query = self.search_box.query.to_string();
-        let filtered = self.history.search(&query);
+        let filtered = self.history.search(&query, &self.config.storage.sort_order);
         
         if let Some(item) = filtered.get(self.history_list.selected_index) {
             match Clipboard::new() {
                 Ok(mut clipboard) => {
                     if clipboard.set_text(&item.content).is_ok() {
-                        // 隐藏窗口
-                        cx.hide();
-                        
-                        // 模拟 Cmd+V 粘贴
-                        // 需要在后台线程执行，避免阻塞 UI，同时给予窗口隐藏的时间
-                        cx.spawn(|_, cx: &mut AsyncApp| {
-                            let cx = cx.clone();
-                            async move {
-                                 // 等待窗口隐藏和焦点切换 - 增加到 300ms 以确保稳定性
-                                 cx.background_executor().timer(Duration::from_millis(300)).await;
-                                 
-                                 #[cfg(target_os = "macos")]
-                                 {
-                                     use std::process::Command;
-                                     let _ = Command::new("osascript")
-                                         .arg("-e")
-                                         .arg("tell application \"System Events\" to keystroke \"v\" using command down")
-                                         .output();
-                                 }
-                            }
-                        }).detach();
+                        // 根据配置决定是否自动粘贴
+                        if matches!(self.config.general.paste_behavior, PasteBehavior::DirectPaste) {
+                            // 模拟 Cmd+V 粘贴
+                            cx.spawn(|_, cx: &mut AsyncApp| {
+                                let cx = cx.clone();
+                                async move {
+                                     cx.background_executor().timer(Duration::from_millis(300)).await;
+                                     #[cfg(target_os = "macos")]
+                                     {
+                                         use std::process::Command;
+                                         let _ = Command::new("osascript")
+                                             .arg("-e")
+                                             .arg("tell application \"System Events\" to keystroke \"v\" using command down")
+                                             .output();
+                                     }
+                                }
+                            }).detach();
+                        }
                         
                         self.status_message = Some(format!("✓ 已复制: {}", Self::truncate(&item.content, 30)).into());
                     } else {
@@ -258,29 +260,29 @@ impl Snapaste {
     
     /// 选择指定索引的项并复制（自动粘贴）
     fn select_item(&mut self, index: usize, cx: &mut Context<Self>) {
-        let filtered = self.history.search(&self.search_query);
+        let filtered = self.history.search(&self.search_query, &self.config.storage.sort_order);
         if let Some(item) = filtered.get(index) {
             match Clipboard::new() {
                 Ok(mut clipboard) => {
                     if clipboard.set_text(&item.content).is_ok() {
-                        // 隐藏窗口
-                        cx.hide();
-                        
-                        // 模拟 Cmd+V 粘贴
-                        cx.spawn(|_, cx: &mut AsyncApp| {
-                            let cx = cx.clone();
-                            async move {
-                                 cx.background_executor().timer(Duration::from_millis(300)).await;
-                                 #[cfg(target_os = "macos")]
-                                 {
-                                     use std::process::Command;
-                                     let _ = Command::new("osascript")
-                                         .arg("-e")
-                                         .arg("tell application \"System Events\" to keystroke \"v\" using command down")
-                                         .output();
-                                 }
-                            }
-                        }).detach();
+                        // 根据配置决定是否自动粘贴
+                        if matches!(self.config.general.paste_behavior, PasteBehavior::DirectPaste) {
+                            // 模拟 Cmd+V 粘贴
+                            cx.spawn(|_, cx: &mut AsyncApp| {
+                                let cx = cx.clone();
+                                async move {
+                                     cx.background_executor().timer(Duration::from_millis(300)).await;
+                                     #[cfg(target_os = "macos")]
+                                     {
+                                         use std::process::Command;
+                                         let _ = Command::new("osascript")
+                                             .arg("-e")
+                                             .arg("tell application \"System Events\" to keystroke \"v\" using command down")
+                                             .output();
+                                     }
+                                }
+                            }).detach();
+                        }
                         
                         self.status_message = Some(format!("✓ 已复制: {}", Self::truncate(&item.content, 30)).into());
                     }
@@ -692,11 +694,474 @@ impl Render for Snapaste {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SettingsTab {
+    General,
+    Storage,
+}
+
+/// 设置视图
+pub struct Settings {
+    theme: Theme,
+    active_tab: SettingsTab,
+    config: AppConfig,
+}
+
+impl Settings {
+    pub fn new(_cx: &mut Context<Self>) -> Self {
+        Self {
+            theme: Theme::dark(),
+            active_tab: SettingsTab::General,
+            config: AppConfig::load(),
+        }
+    }
+
+    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = &self.theme;
+        
+        div()
+            .flex()
+            .gap(px(16.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .px(px(Sizes::PADDING))
+            .child(
+                self.render_tab_item("通用", SettingsTab::General, cx)
+            )
+            .child(
+                self.render_tab_item("储存", SettingsTab::Storage, cx)
+            )
+    }
+
+    fn render_tab_item(&self, label: &'static str, tab: SettingsTab, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = &self.theme;
+        let is_active = self.active_tab == tab;
+        
+        div()
+            .id(SharedString::from(format!("tab-{}", label)))
+            .py(px(8.0))
+            .cursor_pointer()
+            .border_b_2()
+            .border_color(if is_active { theme.primary } else { hsla(0.0, 0.0, 0.0, 0.0) })
+            .child(
+                div()
+                    .text_size(px(Sizes::FONT_SIZE))
+                    .text_color(if is_active { theme.text_primary } else { theme.text_secondary })
+                    .child(label)
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.active_tab = tab;
+                cx.notify();
+            }))
+    }
+
+    fn render_general_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let _theme = &self.theme;
+        let config = &self.config.general;
+        
+        div()
+            .p(px(Sizes::PADDING))
+            .flex()
+            .flex_col()
+            .gap(px(20.0))
+            .child(self.render_setting_item("开机自启", "应用程序随系统启动", config.autostart, cx.listener(|this, _, _, cx| {
+                this.config.general.autostart = !this.config.general.autostart;
+                let _ = this.config.general.update_autostart();
+                let _ = this.config.save();
+                cx.notify();
+            })))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(Sizes::FONT_SIZE))
+                                    .text_color(self.theme.text_primary)
+                                    .child("唤起快捷键")
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(Sizes::FONT_SIZE_SM))
+                                    .text_color(self.theme.text_secondary)
+                                    .child("用于显示 Snapaste 窗口的全局快捷键")
+                            )
+                    )
+                    .child(
+                        div()
+                            .id("hotkey-input")
+                            .px(px(10.0))
+                            .py(px(4.0))
+                            .bg(self.theme.surface)
+                            .rounded(px(Sizes::RADIUS_SM))
+                            .border_1()
+                            .border_color(self.theme.border)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                // 这里可以改为激活一个输入框或者简单的弹窗
+                                // 为了简化，目前点击循环切换几个预设
+                                if this.config.general.hotkey == "Ctrl+/" {
+                                    this.config.general.hotkey = "Cmd+Shift+V".to_string();
+                                } else if this.config.general.hotkey == "Cmd+Shift+V" {
+                                    this.config.general.hotkey = "Alt+Space".to_string();
+                                } else {
+                                    this.config.general.hotkey = "Ctrl+/".to_string();
+                                }
+                                let _ = this.config.save();
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .text_size(px(Sizes::FONT_SIZE))
+                                    .text_color(self.theme.primary)
+                                    .child(config.hotkey.clone())
+                            )
+                    )
+            )
+            .child(self.render_setting_item("退出时清理记录", "关闭程序时清空粘贴板记录", config.clear_on_exit, cx.listener(|this, _, _, cx| {
+                this.config.general.clear_on_exit = !this.config.general.clear_on_exit;
+                let _ = this.config.save();
+                cx.notify();
+            })))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(Sizes::FONT_SIZE))
+                            .text_color(self.theme.text_primary)
+                            .child("粘贴行为")
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(12.0))
+                            .child(self.render_radio_item("选中即粘贴", matches!(config.paste_behavior, PasteBehavior::DirectPaste), cx.listener(|this, _, _, cx| {
+                                this.config.general.paste_behavior = PasteBehavior::DirectPaste;
+                                let _ = this.config.save();
+                                cx.notify();
+                            })))
+                            .child(self.render_radio_item("选中仅复制", matches!(config.paste_behavior, PasteBehavior::SelectOnly), cx.listener(|this, _, _, cx| {
+                                this.config.general.paste_behavior = PasteBehavior::SelectOnly;
+                                let _ = this.config.save();
+                                cx.notify();
+                            })))
+                    )
+            )
+    }
+
+    fn render_storage_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let _theme = &self.theme;
+        let config = &self.config.storage;
+        
+        div()
+            .p(px(Sizes::PADDING))
+            .flex()
+            .flex_col()
+            .gap(px(20.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(Sizes::FONT_SIZE))
+                            .text_color(self.theme.text_primary)
+                            .child("保存内容类型")
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(16.0))
+                            .child(self.render_checkbox_item("文本", config.store_text, cx.listener(|this, _, _, cx| {
+                                this.config.storage.store_text = !this.config.storage.store_text;
+                                let _ = this.config.save();
+                                cx.notify();
+                            })))
+                            .child(self.render_checkbox_item("图片", config.store_image, cx.listener(|this, _, _, cx| {
+                                this.config.storage.store_image = !this.config.storage.store_image;
+                                let _ = this.config.save();
+                                cx.notify();
+                            })))
+                            .child(self.render_checkbox_item("文件", config.store_file, cx.listener(|this, _, _, cx| {
+                                this.config.storage.store_file = !this.config.storage.store_file;
+                                let _ = this.config.save();
+                                cx.notify();
+                            })))
+                    )
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(Sizes::FONT_SIZE))
+                                    .text_color(self.theme.text_primary)
+                                    .child("记录上限")
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(Sizes::FONT_SIZE_SM))
+                                    .text_color(self.theme.text_secondary)
+                                    .child("超过此上限的旧记录将被删除")
+                            )
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .id("limit-minus")
+                                    .px(px(8.0))
+                                    .py(px(4.0))
+                                    .bg(self.theme.surface)
+                                    .rounded(px(Sizes::RADIUS_SM))
+                                    .border_1()
+                                    .border_color(self.theme.border)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(self.theme.hover))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if this.config.storage.limit > 10 {
+                                            this.config.storage.limit -= 10;
+                                            let _ = this.config.save();
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .child("-")
+                            )
+                            .child(
+                                div()
+                                    .w(px(60.0))
+                                    .flex()
+                                    .justify_center()
+                                    .text_size(px(Sizes::FONT_SIZE))
+                                    .text_color(self.theme.text_primary)
+                                    .child(format!("{}", config.limit))
+                            )
+                            .child(
+                                div()
+                                    .id("limit-plus")
+                                    .px(px(8.0))
+                                    .py(px(4.0))
+                                    .bg(self.theme.surface)
+                                    .rounded(px(Sizes::RADIUS_SM))
+                                    .border_1()
+                                    .border_color(self.theme.border)
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(self.theme.hover))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.config.storage.limit += 10;
+                                        let _ = this.config.save();
+                                        cx.notify();
+                                    }))
+                                    .child("+")
+                            )
+                    )
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(Sizes::FONT_SIZE))
+                            .text_color(self.theme.text_primary)
+                            .child("排列方式")
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(12.0))
+                            .child(self.render_radio_item("上次复制时间", matches!(config.sort_order, SortOrder::LastCopied), cx.listener(|this, _, _, cx| {
+                                this.config.storage.sort_order = SortOrder::LastCopied;
+                                let _ = this.config.save();
+                                cx.notify();
+                            })))
+                            .child(self.render_radio_item("首次复制时间", matches!(config.sort_order, SortOrder::FirstCopied), cx.listener(|this, _, _, cx| {
+                                this.config.storage.sort_order = SortOrder::FirstCopied;
+                                let _ = this.config.save();
+                                cx.notify();
+                            })))
+                            .child(self.render_radio_item("复制次数", matches!(config.sort_order, SortOrder::CopyCount), cx.listener(|this, _, _, cx| {
+                                this.config.storage.sort_order = SortOrder::CopyCount;
+                                let _ = this.config.save();
+                                cx.notify();
+                            })))
+                    )
+            )
+    }
+
+    fn render_setting_item(&self, title: &'static str, desc: &'static str, value: bool, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(Sizes::FONT_SIZE))
+                            .text_color(self.theme.text_primary)
+                            .child(title)
+                    )
+                    .child(
+                        div()
+                            .text_size(px(Sizes::FONT_SIZE_SM))
+                            .text_color(self.theme.text_secondary)
+                            .child(desc)
+                    )
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("setting-{}", title)))
+                    .w(px(40.0))
+                    .h(px(20.0))
+                    .bg(if value { self.theme.primary } else { self.theme.border })
+                    .rounded(px(10.0))
+                    .relative()
+                    .cursor_pointer()
+                    .on_click(on_click)
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(2.0))
+                            .left(if value { px(22.0) } else { px(2.0) })
+                            .w(px(16.0))
+                            .h(px(16.0))
+                            .bg(white())
+                            .rounded(px(8.0))
+                    )
+            )
+    }
+
+    fn render_radio_item(&self, label: &'static str, active: bool, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+        div()
+            .id(SharedString::from(format!("radio-{}", label)))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .on_click(on_click)
+            .child(
+                div()
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(if active { self.theme.primary } else { self.theme.border })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        if active {
+                            div().w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(self.theme.primary)
+                        } else {
+                            div()
+                        }
+                    )
+            )
+            .child(
+                div()
+                    .text_size(px(Sizes::FONT_SIZE_SM))
+                    .text_color(if active { self.theme.text_primary } else { self.theme.text_secondary })
+                    .child(label)
+            )
+    }
+
+    fn render_checkbox_item(&self, label: &'static str, active: bool, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+        div()
+            .id(SharedString::from(format!("checkbox-{}", label)))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .cursor_pointer()
+            .on_click(on_click)
+            .child(
+                div()
+                    .w(px(16.0))
+                    .h(px(16.0))
+                    .rounded(px(2.0))
+                    .border_1()
+                    .border_color(if active { self.theme.primary } else { self.theme.border })
+                    .bg(if active { self.theme.primary } else { hsla(0.0, 0.0, 0.0, 0.0) })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        if active {
+                            div().text_size(px(10.0)).text_color(white()).child("✓")
+                        } else {
+                            div()
+                        }
+                    )
+            )
+            .child(
+                div()
+                    .text_size(px(Sizes::FONT_SIZE_SM))
+                    .text_color(if active { self.theme.text_primary } else { self.theme.text_secondary })
+                    .child(label)
+            )
+    }
+}
+
+impl Render for Settings {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .bg(self.theme.background)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(40.0))
+                    .px(px(Sizes::PADDING))
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(px(18.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(self.theme.text_primary)
+                            .child("设置")
+                    )
+            )
+            .child(self.render_tabs(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .child(match self.active_tab {
+                        SettingsTab::General => self.render_general_settings(cx).into_any_element(),
+                        SettingsTab::Storage => self.render_storage_settings(cx).into_any_element(),
+                    })
+            )
+    }
+}
+
 /// 全局应用控制器
 struct AppController {
     tray: Option<crate::tray::TrayManager>,
     hotkey_manager: Option<GlobalHotKeyManager>,
     window_handle: Option<WindowHandle<Snapaste>>,
+    settings_handle: Option<WindowHandle<Settings>>,
 }
 
 impl AppController {
@@ -711,18 +1176,16 @@ impl AppController {
             tray,
             hotkey_manager,
             window_handle: None,
+            settings_handle: None,
         }
     }
     
     fn open_window(&mut self, cx: &mut Context<Self>) {
         // 如果窗口已存在且有效，激活它
         if let Some(handle) = &self.window_handle {
-             // WindowHandle::update 闭包接受: (&mut V, &mut WindowContext)
-             if handle.update(cx, |_, _window, _cx| {
-                 // cx.activate_window();
-             }).is_ok() {
-                 cx.activate(true);
-                 return;
+             if handle.update(cx, |_, _, _| {}).is_ok() {
+                  cx.activate(true);
+                  return;
              }
         }
         
@@ -748,7 +1211,6 @@ impl AppController {
             ..Default::default()
         };
         
-        // 我们需要传递 &mut AppContext
         let view: anyhow::Result<WindowHandle<Snapaste>> = cx.open_window(window_options, |_, cx| {
              cx.new(|cx| {
                  Snapaste::new(receiver, cx)
@@ -765,16 +1227,112 @@ impl AppController {
         }
     }
 
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = &self.settings_handle {
+            if handle.update(cx, |_, _, _| {}).is_ok() {
+                cx.activate(true);
+                return;
+            }
+        }
+
+        let window_options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(400.0), px(500.0)),
+                cx,
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Snapaste 设置".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let view = cx.open_window(window_options, |_, cx| {
+            cx.new(|cx| Settings::new(cx))
+        });
+
+        if let Ok(view) = view {
+            self.settings_handle = Some(view);
+            cx.activate(true);
+        }
+    }
+
     fn handle_menu(&mut self, event: muda::MenuEvent, cx: &mut Context<Self>) {
         let id = event.id.0.as_str();
-        use crate::tray::{SHOW_ID, QUIT_ID};
+        use crate::tray::{SHOW_ID, SETTINGS_ID, QUIT_ID};
         
         if id == SHOW_ID {
             self.open_window(cx);
+        } else if id == SETTINGS_ID {
+            self.open_settings(cx);
         } else if id == QUIT_ID {
+            let config = AppConfig::load();
+            if config.general.clear_on_exit {
+                // 如果需要清理，删除 lock 文件或数据目录下的历史记录 (如果有持久化历史)
+                // 目前历史似乎是内存中的，所以 quit 就会清理
+                // 如果有持久化逻辑，这里需要显式清理
+            }
             cx.quit();
         }
     }
+}
+
+/// 解析热键字符串
+fn parse_hotkey(s: &str) -> Option<HotKey> {
+    let parts: Vec<&str> = s.split('+').collect();
+    let mut modifiers = Modifiers::empty();
+    let mut code = None;
+
+    for part in parts {
+        match part.to_lowercase().as_str() {
+            "cmd" | "command" => modifiers |= Modifiers::META,
+            "ctrl" | "control" => modifiers |= Modifiers::CONTROL,
+            "alt" | "option" => modifiers |= Modifiers::ALT,
+            "shift" => modifiers |= Modifiers::SHIFT,
+            "space" => code = Some(Code::Space),
+            "/" => code = Some(Code::Slash),
+            "v" => code = Some(Code::KeyV),
+            // 可以添加更多映射
+            _ => {
+                // 简单的字母映射
+                if part.len() == 1 {
+                    let c = part.chars().next().unwrap().to_ascii_uppercase();
+                    code = match c {
+                        'A' => Some(Code::KeyA),
+                        'B' => Some(Code::KeyB),
+                        'C' => Some(Code::KeyC),
+                        'D' => Some(Code::KeyD),
+                        'E' => Some(Code::KeyE),
+                        'F' => Some(Code::KeyF),
+                        'G' => Some(Code::KeyG),
+                        'H' => Some(Code::KeyH),
+                        'I' => Some(Code::KeyI),
+                        'J' => Some(Code::KeyJ),
+                        'K' => Some(Code::KeyK),
+                        'L' => Some(Code::KeyL),
+                        'M' => Some(Code::KeyM),
+                        'N' => Some(Code::KeyN),
+                        'O' => Some(Code::KeyO),
+                        'P' => Some(Code::KeyP),
+                        'Q' => Some(Code::KeyQ),
+                        'R' => Some(Code::KeyR),
+                        'S' => Some(Code::KeyS),
+                        'T' => Some(Code::KeyT),
+                        'U' => Some(Code::KeyU),
+                        'V' => Some(Code::KeyV),
+                        'W' => Some(Code::KeyW),
+                        'X' => Some(Code::KeyX),
+                        'Y' => Some(Code::KeyY),
+                        'Z' => Some(Code::KeyZ),
+                        _ => None,
+                    };
+                }
+            }
+        }
+    }
+
+    code.map(|c| HotKey::new(if modifiers.is_empty() { None } else { Some(modifiers) }, c))
 }
 
 /// 运行 GUI 应用
@@ -809,14 +1367,16 @@ pub fn run_gui() -> anyhow::Result<()> {
             gpui::MenuItem::action("显示 Snapaste", MoveUp),
         ]);
 
-        // 注册全局热键 Ctrl+/
+        // 注册全局热键 (从配置读取)
+        let config = AppConfig::load();
         let hotkey_manager = GlobalHotKeyManager::new().ok();
         if let Some(ref manager) = hotkey_manager {
-            let hotkey = HotKey::new(Some(Modifiers::CONTROL), Code::Slash);
-            if let Err(e) = manager.register(hotkey) {
-                eprintln!("无法注册全局热键 Ctrl+/: {:?}", e);
-            } else {
-                println!("✓ 全局热键 Ctrl+/ 已注册");
+            if let Some(hotkey) = parse_hotkey(&config.general.hotkey) {
+                if let Err(e) = manager.register(hotkey) {
+                    eprintln!("无法注册全局热键 {}: {:?}", config.general.hotkey, e);
+                } else {
+                    println!("✓ 全局热键 {} 已注册", config.general.hotkey);
+                }
             }
         }
         
